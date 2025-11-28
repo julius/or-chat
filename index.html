@@ -167,7 +167,7 @@
     </head>
     <body>
         <div style="display: flex; gap: 1.5rem; align-items: flex-start">
-            <div id="avatarPanel">
+            <div id="avatarPanel" style="display: none;">
                 <img id="avatarImage" src="" alt="Avatar" />
                 <input type="text" id="avatarUrlInput" placeholder="Bild-URL einfügen" />
             </div>
@@ -182,13 +182,9 @@
         <button onclick="abortGeneration()">Abbrechen</button>
         <button onclick="clearChat()">Verlauf löschen</button>
 
-        <div style="padding: 20px 0 0 0">
-            Model: <input type="text" id="modelId" style="width: 100%" />
-        </div>
+        <div style="padding: 20px 0 0 0">Model: <input type="text" id="modelId" style="width: 100%" /></div>
 
-        <div style="padding: 20px 0 0 0">
-            API-Key: <input type="text" id="apiKey" style="width: 100%" />
-        </div>
+        <div style="padding: 20px 0 0 0">API-Key: <input type="text" id="apiKey" style="width: 100%" /></div>
 
         <div style="display: flex; gap: 1rem; margin-top: 1rem">
             <div style="flex: 1">
@@ -225,40 +221,95 @@
             let isGenerating = false;
             let editIndex = null;
 
+            function generateId() {
+                return 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            }
+
             function renderMessages() {
-                chatBox.innerHTML = '';
+                // 1. Create a Set of current IDs for quick lookup
+                const currentIds = new Set(messages.map(m => m.id));
 
+                // 2. Remove DOM elements that are no longer in the messages array
+                // (We iterate backwards to safely remove elements while looping)
+                const children = Array.from(chatBox.children);
+                for (let i = children.length - 1; i >= 0; i--) {
+                    const child = children[i];
+                    const childId = child.getAttribute('data-message-id');
+                    if (childId && !currentIds.has(childId)) {
+                        child.remove();
+                    }
+                }
+
+                // 3. Add new messages or update existing ones
                 messages.forEach((msg, index) => {
-                    const wrapper = document.createElement('div');
-                    wrapper.classList.add('message');
+                    // Ensure message has an ID (fixes legacy data or devtools manipulation)
+                    if (!msg.id) msg.id = generateId();
 
-                    const content = document.createElement('div');
-                    content.classList.add('message-content');
-                    if (msg.role === 'user') content.innerHTML = `👤: ${renderStyledText(msg.content)}`;
-                    else if (msg.role === 'assistant') content.innerHTML = `${renderStyledText(msg.content)}`;
-                    else content.innerHTML = `🛠️: ${renderStyledText(msg.content)}`;
+                    let messageEl = document.getElementById(msg.id);
 
-                    const actions = document.createElement('div');
-                    actions.classList.add('message-buttons');
+                    if (!messageEl) {
+                        // --- CREATE NEW ELEMENT ---
+                        messageEl = document.createElement('div');
+                        messageEl.id = msg.id;
+                        messageEl.setAttribute('data-message-id', msg.id);
+                        messageEl.classList.add('message');
+
+                        const contentDiv = document.createElement('div');
+                        contentDiv.classList.add('message-content');
+
+                        const actionsDiv = document.createElement('div');
+                        actionsDiv.classList.add('message-buttons');
+
+                        messageEl.append(contentDiv, actionsDiv);
+                        chatBox.appendChild(messageEl); // Append to DOM immediately
+                    }
+
+                    // --- UPDATE CONTENT (Only if changed) ---
+                    const contentDiv = messageEl.querySelector('.message-content');
+                    // We store the raw content in a data attribute to compare efficiently
+                    const previousRaw = contentDiv.getAttribute('data-raw-content');
+
+                    if (previousRaw !== msg.content) {
+                        if (msg.role === 'user') contentDiv.innerHTML = `👤: ${renderStyledText(msg.content)}`;
+                        else if (msg.role === 'assistant') contentDiv.innerHTML = `${renderStyledText(msg.content)}`;
+                        else contentDiv.innerHTML = `🛠️: ${renderStyledText(msg.content)}`;
+
+                        contentDiv.setAttribute('data-raw-content', msg.content || '');
+                    }
+
+                    // --- UPDATE BUTTONS (Always re-bind to ensure correct index) ---
+                    // Since indexes shift when messages are deleted, we must update onclick handlers
+                    const actionsDiv = messageEl.querySelector('.message-buttons');
+                    actionsDiv.innerHTML = ''; // Clear old buttons to rebuild with correct index
+
                     const editBtn = document.createElement('button');
                     editBtn.innerHTML = '✏️';
                     editBtn.title = 'Bearbeiten';
                     editBtn.onclick = () => openEditModal(index);
+
                     const removeBtn = document.createElement('button');
                     removeBtn.innerHTML = '🗑️';
                     removeBtn.title = 'Entfernen';
                     removeBtn.onclick = () => removeMessage(index);
+
                     const removeAfterBtn = document.createElement('button');
                     removeAfterBtn.innerHTML = '⏩';
                     removeAfterBtn.title = 'Nachfolgende löschen';
                     removeAfterBtn.onclick = () => removeAfter(index);
-                    actions.append(editBtn, removeBtn, removeAfterBtn);
 
-                    wrapper.append(content, actions);
-                    chatBox.appendChild(wrapper);
+                    actionsDiv.append(editBtn, removeBtn, removeAfterBtn);
+
+                    // --- ENSURE ORDER ---
+                    // appendChild moves an existing element to the end.
+                    // By doing this in the loop order, we ensure DOM order matches Array order.
+                    chatBox.appendChild(messageEl);
                 });
 
+                // Auto-scroll logic: only scroll if we are at the bottom or it's a new message
+                // (Simple version: always scroll to bottom on render)
                 chatBox.scrollTop = chatBox.scrollHeight;
+
+                // Save state
                 localStorage.setItem('chatMessages', JSON.stringify(messages));
             }
 
@@ -276,7 +327,6 @@
                     const char = text[i];
 
                     if (char === '*' && mode === 'normal') {
-                        // flush normal text
                         if (buffer) result += escape(buffer);
                         buffer = '';
                         mode = 'action';
@@ -307,7 +357,6 @@
                     buffer += char;
                 }
 
-                // flush leftovers
                 if (buffer) {
                     if (mode === 'action') {
                         result += `<span class="action-text">` + escape(buffer) + `</span>`;
@@ -324,8 +373,9 @@
             async function sendMessage() {
                 if (isGenerating) return;
                 const userMessage = userInput.value.trim();
+
                 if (userMessage) {
-                    messages.push({ role: 'user', content: userMessage });
+                    messages.push({ role: 'user', content: userMessage, id: generateId() });
                 }
 
                 isGenerating = true;
@@ -334,7 +384,7 @@
                 controller = new AbortController();
                 const signal = controller.signal;
 
-                const aiMessage = { role: 'assistant', content: '' };
+                const aiMessage = { role: 'assistant', content: '', id: generateId() };
                 messages.push(aiMessage);
 
                 renderMessages();
@@ -345,21 +395,18 @@
 
                     const payloadMessages = [];
 
-                    // System Long
                     if (systemLong) {
                         payloadMessages.push({ role: 'system', content: systemLong });
                     }
 
-                    // Gather non-system messages
                     const nonSystem = messages.filter(m => m.role !== 'system');
-
                     const latestMessages = [];
                     for (let i = nonSystem.length - 1; i >= 0; i--) {
-                        const m = nonSystem[i];
-                        latestMessages.unshift(m);
+                        // Send pure content, strip IDs for API
+                        const { role, content } = nonSystem[i];
+                        latestMessages.unshift({ role, content });
                     }
 
-                    // Insert System Short before last user/assistant
                     if (systemShort && latestMessages.length >= 2) {
                         latestMessages.splice(latestMessages.length - 2, 0, {
                             role: 'system',
@@ -367,7 +414,6 @@
                         });
                     }
 
-                    // Final payload
                     payloadMessages.push(...latestMessages);
 
                     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -402,7 +448,7 @@
                                 const parsed = JSON.parse(jsonStr);
                                 const content = parsed.choices?.[0]?.delta?.content || '';
                                 aiMessage.content += content;
-                                renderMessages();
+                                renderMessages(); // This is now efficient!
                             } catch (e) {
                                 console.error('Fehler beim Parsen:', e, line);
                             }
@@ -470,6 +516,9 @@
                 if (saved) {
                     try {
                         messages = JSON.parse(saved);
+                        messages.forEach(m => {
+                            if (!m.id) m.id = generateId();
+                        });
                     } catch (e) {
                         console.error('Fehler beim Laden des gespeicherten Chats:', e);
                     }
@@ -500,7 +549,6 @@
                 const avatarImage = document.getElementById('avatarImage');
                 const avatarUrlInput = document.getElementById('avatarUrlInput');
 
-                // Bild-URL aktualisieren und speichern
                 function updateAvatarUrl() {
                     const url = avatarUrlInput.value.trim();
                     avatarImage.src = url;
@@ -509,14 +557,12 @@
 
                 avatarUrlInput.addEventListener('input', updateAvatarUrl);
 
-                // Beim Laden gespeicherte URL wiederherstellen
                 const savedAvatarUrl = localStorage.getItem('avatarUrl');
                 if (savedAvatarUrl) {
                     avatarUrlInput.value = savedAvatarUrl;
                     avatarImage.src = savedAvatarUrl;
                 }
             });
-
         </script>
     </body>
 </html>

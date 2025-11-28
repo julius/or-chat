@@ -167,7 +167,7 @@
     </head>
     <body>
         <div style="display: flex; gap: 1.5rem; align-items: flex-start">
-            <div id="avatarPanel" style="display: none;">
+            <div id="avatarPanel" style="display: none">
                 <img id="avatarImage" src="" alt="Avatar" />
                 <input type="text" id="avatarUrlInput" placeholder="Bild-URL einfügen" />
             </div>
@@ -225,97 +225,126 @@
                 return 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             }
 
+            // ==========================================
+            // 🐢 SLOW PATH: Full Reconciliation
+            // Use this ONLY for: Load, Add, Delete, Edit
+            // ==========================================
             function renderMessages() {
-                // 1. Create a Set of current IDs for quick lookup
                 const currentIds = new Set(messages.map(m => m.id));
 
-                // 2. Remove DOM elements that are no longer in the messages array
-                // (We iterate backwards to safely remove elements while looping)
+                // 1. Clean up deleted DOM nodes
                 const children = Array.from(chatBox.children);
                 for (let i = children.length - 1; i >= 0; i--) {
                     const child = children[i];
-                    const childId = child.getAttribute('data-message-id');
-                    if (childId && !currentIds.has(childId)) {
+                    if (!currentIds.has(child.id)) {
                         child.remove();
                     }
                 }
 
-                // 3. Add new messages or update existing ones
+                // 2. Create or Update nodes
                 messages.forEach((msg, index) => {
-                    // Ensure message has an ID (fixes legacy data or devtools manipulation)
-                    if (!msg.id) msg.id = generateId();
+                    if (!msg.id) msg.id = generateId(); // Safety fix for old data
 
                     let messageEl = document.getElementById(msg.id);
 
+                    // If element doesn't exist, create it (Standard DOM creation)
                     if (!messageEl) {
-                        // --- CREATE NEW ELEMENT ---
-                        messageEl = document.createElement('div');
-                        messageEl.id = msg.id;
-                        messageEl.setAttribute('data-message-id', msg.id);
-                        messageEl.classList.add('message');
+                        messageEl = createMessageElement(msg, index);
+                        chatBox.appendChild(messageEl);
+                    } else {
+                        // If it exists, ensure the buttons have the correct index
+                        // (Indexes change when messages are deleted!)
+                        updateMessageButtons(messageEl, index);
 
-                        const contentDiv = document.createElement('div');
-                        contentDiv.classList.add('message-content');
-
-                        const actionsDiv = document.createElement('div');
-                        actionsDiv.classList.add('message-buttons');
-
-                        messageEl.append(contentDiv, actionsDiv);
-                        chatBox.appendChild(messageEl); // Append to DOM immediately
+                        // Check if content drifted (e.g. via Edit)
+                        const contentDiv = messageEl.querySelector('.message-content');
+                        if (contentDiv.getAttribute('data-raw') !== msg.content) {
+                            contentDiv.innerHTML = formatMessageContent(msg);
+                            contentDiv.setAttribute('data-raw', msg.content);
+                        }
                     }
 
-                    // --- UPDATE CONTENT (Only if changed) ---
-                    const contentDiv = messageEl.querySelector('.message-content');
-                    // We store the raw content in a data attribute to compare efficiently
-                    const previousRaw = contentDiv.getAttribute('data-raw-content');
-
-                    if (previousRaw !== msg.content) {
-                        if (msg.role === 'user') contentDiv.innerHTML = `👤: ${renderStyledText(msg.content)}`;
-                        else if (msg.role === 'assistant') contentDiv.innerHTML = `${renderStyledText(msg.content)}`;
-                        else contentDiv.innerHTML = `🛠️: ${renderStyledText(msg.content)}`;
-
-                        contentDiv.setAttribute('data-raw-content', msg.content || '');
-                    }
-
-                    // --- UPDATE BUTTONS (Always re-bind to ensure correct index) ---
-                    // Since indexes shift when messages are deleted, we must update onclick handlers
-                    const actionsDiv = messageEl.querySelector('.message-buttons');
-                    actionsDiv.innerHTML = ''; // Clear old buttons to rebuild with correct index
-
-                    const editBtn = document.createElement('button');
-                    editBtn.innerHTML = '✏️';
-                    editBtn.title = 'Bearbeiten';
-                    editBtn.onclick = () => openEditModal(index);
-
-                    const removeBtn = document.createElement('button');
-                    removeBtn.innerHTML = '🗑️';
-                    removeBtn.title = 'Entfernen';
-                    removeBtn.onclick = () => removeMessage(index);
-
-                    const removeAfterBtn = document.createElement('button');
-                    removeAfterBtn.innerHTML = '⏩';
-                    removeAfterBtn.title = 'Nachfolgende löschen';
-                    removeAfterBtn.onclick = () => removeAfter(index);
-
-                    actionsDiv.append(editBtn, removeBtn, removeAfterBtn);
-
-                    // --- ENSURE ORDER ---
-                    // appendChild moves an existing element to the end.
-                    // By doing this in the loop order, we ensure DOM order matches Array order.
+                    // Ensure DOM order matches Array order
+                    // (appendChild moves existing elements to the end if they are already in DOM)
                     chatBox.appendChild(messageEl);
                 });
 
-                // Auto-scroll logic: only scroll if we are at the bottom or it's a new message
-                // (Simple version: always scroll to bottom on render)
                 chatBox.scrollTop = chatBox.scrollHeight;
-
-                // Save state
                 localStorage.setItem('chatMessages', JSON.stringify(messages));
             }
 
+            // ==========================================
+            // 🐇 FAST PATH: Direct ID Update
+            // Use this inside the Streaming Loop
+            // ==========================================
+            function updateStreamedMessage(id, content) {
+                const messageEl = document.getElementById(id);
+
+                // Safety fallback: If user deleted the element via DevTools WHILE streaming
+                if (!messageEl) {
+                    renderMessages();
+                    return;
+                }
+
+                const contentDiv = messageEl.querySelector('.message-content');
+                // Direct update, no loops, no checks on other messages
+                contentDiv.innerHTML = renderStyledText(content);
+                contentDiv.setAttribute('data-raw', content);
+
+                // Efficient Scroll: Only if near bottom
+                if (chatBox.scrollHeight - chatBox.scrollTop - chatBox.clientHeight < 100) {
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                }
+            }
+
+            // --- Helper: Create Element ---
+            function createMessageElement(msg, index) {
+                const wrapper = document.createElement('div');
+                wrapper.id = msg.id;
+                wrapper.classList.add('message');
+
+                const content = document.createElement('div');
+                content.classList.add('message-content');
+                content.innerHTML = formatMessageContent(msg);
+                content.setAttribute('data-raw', msg.content);
+
+                const actions = document.createElement('div');
+                actions.classList.add('message-buttons');
+
+                wrapper.append(content, actions);
+                updateMessageButtons(wrapper, index); // Bind buttons
+                return wrapper;
+            }
+
+            // --- Helper: Update Buttons ---
+            function updateMessageButtons(element, index) {
+                const actions = element.querySelector('.message-buttons');
+                actions.innerHTML = ''; // Fast clear
+
+                const btnProps = [
+                    { text: '✏️', title: 'Bearbeiten', onclick: () => openEditModal(index) },
+                    { text: '🗑️', title: 'Entfernen', onclick: () => removeMessage(index) },
+                    { text: '⏩', title: 'Nachfolgende löschen', onclick: () => removeAfter(index) },
+                ];
+
+                btnProps.forEach(prop => {
+                    const btn = document.createElement('button');
+                    btn.innerHTML = prop.text;
+                    btn.title = prop.title;
+                    btn.onclick = prop.onclick;
+                    actions.appendChild(btn);
+                });
+            }
+
+            // --- Helper: Format Content ---
+            function formatMessageContent(msg) {
+                const prefix = msg.role === 'user' ? '👤: ' : msg.role === 'system' ? '🛠️: ' : '';
+                return prefix + renderStyledText(msg.content);
+            }
+
+            // --- Your Existing Text Renderer ---
             function renderStyledText(text) {
                 if (!text) return '';
-
                 const escape = str =>
                     str.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[c]);
 
@@ -325,51 +354,41 @@
 
                 for (let i = 0; i < text.length; i++) {
                     const char = text[i];
-
                     if (char === '*' && mode === 'normal') {
                         if (buffer) result += escape(buffer);
                         buffer = '';
                         mode = 'action';
                         continue;
                     }
-
                     if (char === '*' && mode === 'action') {
-                        result += `<span class="action-text">` + escape(buffer) + `</span>`;
+                        result += `<span class="action-text">${escape(buffer)}</span>`;
                         buffer = '';
                         mode = 'normal';
                         continue;
                     }
-
                     if (char === `"` && mode === 'normal') {
                         if (buffer) result += escape(buffer);
                         buffer = '';
                         mode = 'spoken';
                         continue;
                     }
-
                     if (char === `"` && mode === 'spoken') {
-                        result += `<span class="spoken-text">"` + escape(buffer) + `"</span>`;
+                        result += `<span class="spoken-text">"${escape(buffer)}"</span>`;
                         buffer = '';
                         mode = 'normal';
                         continue;
                     }
-
                     buffer += char;
                 }
-
                 if (buffer) {
-                    if (mode === 'action') {
-                        result += `<span class="action-text">` + escape(buffer) + `</span>`;
-                    } else if (mode === 'spoken') {
-                        result += `<span class="spoken-text">"` + escape(buffer) + `</span>`;
-                    } else {
-                        result += escape(buffer);
-                    }
+                    if (mode === 'action') result += `<span class="action-text">${escape(buffer)}</span>`;
+                    else if (mode === 'spoken') result += `<span class="spoken-text">"${escape(buffer)}</span>`;
+                    else result += escape(buffer);
                 }
-
                 return result;
             }
 
+            // --- MAIN SEND FUNCTION ---
             async function sendMessage() {
                 if (isGenerating) return;
                 const userMessage = userInput.value.trim();
@@ -379,41 +398,35 @@
                 }
 
                 isGenerating = true;
+
+                // 1. Initial Render (Adds the user message to DOM)
                 renderMessages();
 
                 controller = new AbortController();
                 const signal = controller.signal;
 
-                const aiMessage = { role: 'assistant', content: '', id: generateId() };
+                // 2. Prepare AI Message
+                const aiId = generateId(); // Generate ID immediately
+                const aiMessage = { role: 'assistant', content: '', id: aiId };
                 messages.push(aiMessage);
 
+                // 3. Render again to put the empty AI container in the DOM
                 renderMessages();
 
                 try {
                     const systemLong = document.getElementById('systemLong').value.trim();
                     const systemShort = document.getElementById('systemShort').value.trim();
-
                     const payloadMessages = [];
 
-                    if (systemLong) {
-                        payloadMessages.push({ role: 'system', content: systemLong });
-                    }
+                    if (systemLong) payloadMessages.push({ role: 'system', content: systemLong });
 
                     const nonSystem = messages.filter(m => m.role !== 'system');
-                    const latestMessages = [];
-                    for (let i = nonSystem.length - 1; i >= 0; i--) {
-                        // Send pure content, strip IDs for API
-                        const { role, content } = nonSystem[i];
-                        latestMessages.unshift({ role, content });
-                    }
+                    // Prepare context (Last N messages)
+                    const latestMessages = nonSystem.map(m => ({ role: m.role, content: m.content }));
 
                     if (systemShort && latestMessages.length >= 2) {
-                        latestMessages.splice(latestMessages.length - 2, 0, {
-                            role: 'system',
-                            content: systemShort,
-                        });
+                        latestMessages.splice(latestMessages.length - 2, 0, { role: 'system', content: systemShort });
                     }
-
                     payloadMessages.push(...latestMessages);
 
                     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -443,33 +456,38 @@
                         for (const line of lines) {
                             const jsonStr = line.replace(/^data: /, '').trim();
                             if (jsonStr === '[DONE]') break;
-
                             try {
                                 const parsed = JSON.parse(jsonStr);
                                 const content = parsed.choices?.[0]?.delta?.content || '';
                                 aiMessage.content += content;
-                                renderMessages(); // This is now efficient!
+
+                                // ✅ CRITICAL CHANGE:
+                                // Call the fast path. No loops. Direct ID access.
+                                updateStreamedMessage(aiId, aiMessage.content);
                             } catch (e) {
-                                console.error('Fehler beim Parsen:', e, line);
+                                console.error(e);
                             }
                         }
                     }
                 } catch (err) {
                     if (err.name === 'AbortError') {
                         aiMessage.content += '\n[⛔ Generierung abgebrochen]';
-                        renderMessages();
+                        updateStreamedMessage(aiId, aiMessage.content);
                     } else {
-                        console.error('Fetch-Fehler:', err);
+                        console.error(err);
                     }
                 } finally {
                     isGenerating = false;
                     controller = null;
                     userInput.value = '';
-                    chatBox.scrollTop = chatBox.scrollHeight;
                     localStorage.setItem('chatMessages', JSON.stringify(messages));
+                    // Optional: One final full render to ensure perfect state,
+                    // though not strictly necessary if updateStreamedMessage works.
+                    // renderMessages();
                 }
             }
 
+            // --- STANDARD UTILS ---
             function abortGeneration() {
                 if (controller) controller.abort();
             }
@@ -510,8 +528,8 @@
                 }
             }
 
+            // --- INIT ---
             window.addEventListener('DOMContentLoaded', () => {
-                // --- MESSAGES ---
                 const saved = localStorage.getItem('chatMessages');
                 if (saved) {
                     try {
@@ -520,47 +538,29 @@
                             if (!m.id) m.id = generateId();
                         });
                     } catch (e) {
-                        console.error('Fehler beim Laden des gespeicherten Chats:', e);
+                        console.error(e);
                     }
                 }
                 renderMessages();
 
-                // --- MODEL / KEY ---
-                document.getElementById('modelId').value = localStorage.getItem('modelId') || '';
-                document.getElementById('modelId').addEventListener('input', () => {
-                    localStorage.setItem('modelId', document.getElementById('modelId').value);
-                });
-                document.getElementById('apiKey').value = localStorage.getItem('apiKey') || '';
-                document.getElementById('apiKey').addEventListener('input', () => {
-                    localStorage.setItem('apiKey', document.getElementById('apiKey').value);
+                // Restore inputs
+                ['modelId', 'apiKey', 'systemLong', 'systemShort'].forEach(id => {
+                    const el = document.getElementById(id);
+                    el.value = localStorage.getItem(id) || '';
+                    el.addEventListener('input', () => localStorage.setItem(id, el.value));
                 });
 
-                // --- SYSTEM MSG ---
-                document.getElementById('systemLong').value = localStorage.getItem('systemLong') || '';
-                document.getElementById('systemShort').value = localStorage.getItem('systemShort') || '';
-                document.getElementById('systemLong').addEventListener('input', () => {
-                    localStorage.setItem('systemLong', document.getElementById('systemLong').value);
-                });
-                document.getElementById('systemShort').addEventListener('input', () => {
-                    localStorage.setItem('systemShort', document.getElementById('systemShort').value);
-                });
-
-                // --- AVATAR ---
+                // Avatar
                 const avatarImage = document.getElementById('avatarImage');
                 const avatarUrlInput = document.getElementById('avatarUrlInput');
-
-                function updateAvatarUrl() {
-                    const url = avatarUrlInput.value.trim();
-                    avatarImage.src = url;
-                    localStorage.setItem('avatarUrl', url);
-                }
-
-                avatarUrlInput.addEventListener('input', updateAvatarUrl);
-
-                const savedAvatarUrl = localStorage.getItem('avatarUrl');
-                if (savedAvatarUrl) {
-                    avatarUrlInput.value = savedAvatarUrl;
-                    avatarImage.src = savedAvatarUrl;
+                avatarUrlInput.addEventListener('input', () => {
+                    avatarImage.src = avatarUrlInput.value;
+                    localStorage.setItem('avatarUrl', avatarUrlInput.value);
+                });
+                const savedAv = localStorage.getItem('avatarUrl');
+                if (savedAv) {
+                    avatarUrlInput.value = savedAv;
+                    avatarImage.src = savedAv;
                 }
             });
         </script>
